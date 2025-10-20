@@ -1,0 +1,228 @@
+import os
+import numpy as np
+import pandas as pd
+import nibabel as nib
+from sklearn.decomposition import PCA
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+input_dirs = {
+    "Label": "/Volumes/OlgaDrive/PhD/Olga_Backup/Results/LC_label_neuromorph/Consensus_Analysis",
+    "Spatial Prior": "/Volumes/OlgaDrive/PhD/Olga_Backup/Results/LC_TPM_neuromorph/Consensus_Analysis"
+}
+
+coord_data = []
+meta = []
+
+for approach, base_dir in input_dirs.items():
+    print(f"\nProcessing: {approach} from {base_dir}")
+    if not os.path.exists(base_dir):
+        print(f"Path not found: {base_dir}")
+        continue
+
+    for fname in os.listdir(base_dir):
+        if not fname.endswith("_consensus.nii.gz") or fname.startswith("._"):
+            print(f"Skipping file: {fname}")
+            continue
+
+        fpath = os.path.join(base_dir, fname)
+        seg = nib.load(fpath)
+        data = seg.get_fdata()
+        print(f"{fname} | min: {data.min()} | max: {data.max()} | nonzero: {np.count_nonzero(data)}")
+
+        mask = data >= 0.01
+        coords = np.argwhere(mask)
+
+        if coords.shape[0] == 0:
+            print(f" No voxels found above threshold in {fname}")
+            continue
+
+        coord_data.append(coords)
+        meta.append({
+            "Author": fname.split("_")[0].lstrip("w"),
+            "Approach": approach,
+            "Subject": fname.replace("_consensus.nii.gz", "")
+        })
+
+print("\nCoordinate extraction complete.")
+
+# ------------------ PCA per Approach ------------------
+print("\nPerforming PCA...")
+
+results = []
+
+for approach in ["Label", "Spatial Prior"]:
+    coords_all = []
+    authors = []
+
+    for coords, m in zip(coord_data, meta):
+        if m["Approach"] != approach:
+            continue
+        coords_all.append(coords)
+        authors.append(m["Author"])
+
+    if len(coords_all) == 0:
+        print(f" No data found for {approach}, skipping PCA.")
+        continue
+
+    coords_stacked = np.vstack(coords_all)
+    pca = PCA(n_components=3)
+    pca.fit(coords_stacked)
+
+    for coords, author in zip(coords_all, authors):
+        if coords.shape[0] == 0:
+            print(f"Skipping {author} in {approach} — empty coordinates.")
+            continue
+
+        proj = pca.transform(coords)
+        mean_proj = proj.mean(axis=0)
+        results.append({
+            "Author": author,
+            "Approach": approach,
+            "PCA_X": mean_proj[0],
+            "PCA_Y": mean_proj[1],
+            "PCA_Z": mean_proj[2]
+        })
+
+df_plot = pd.DataFrame(results)
+
+# ------------------ 1. Density Plots with Significance ------------------
+sns.set(style="white")  # cleaner white background for journals
+
+plt.rcParams.update({
+    "font.size": 20,        # base font size
+    "axes.titlesize": 24,   # subplot titles
+    "axes.labelsize": 22,   # x/y axis labels
+    "xtick.labelsize": 20,  # tick labels
+    "ytick.labelsize": 20,  # tick labels
+    "legend.fontsize": 26   # legend text
+})
+
+pcs = ['PCA_X', 'PCA_Y', 'PCA_Z']
+pc_titles = [
+    "PC1 (Anterior–Posterior)",
+    "PC2 (Left–Right)",
+    "PC3 (Caudal–Rostral)"
+]
+pc_labels = [
+    "PC1 Spatial Gradient",
+    "PC2 Spatial Gradient",
+    "PC3 Spatial Gradient"
+]
+
+# Example p-values and significance labels
+p_fdr = [0.002, 0.04, 0.15]
+sig_labels = ["**", "*", "ns"]
+
+fig, axes = plt.subplots(1, 3, figsize=(20, 7))
+
+for i, pc in enumerate(pcs):
+    df_label = df_plot[df_plot['Approach'] == 'Label']
+    df_sp = df_plot[df_plot['Approach'] == 'Spatial Prior']
+    
+    sns.kdeplot(df_label[pc], color='blue', label='Label', fill=True, alpha=0.4, ax=axes[i])
+    sns.kdeplot(df_sp[pc], color='red', label='Spatial Prior', fill=True, alpha=0.4, ax=axes[i])
+    
+    axes[i].set_title(pc_titles[i], fontsize=24, weight='bold')
+    axes[i].set_xlabel(pc_labels[i], fontsize=22)
+    axes[i].set_ylabel("Density", fontsize=22)
+    axes[i].grid(True, color='lightgrey', linestyle='--', linewidth=0.5)
+   
+    # Add significance annotation
+    x_pos = df_plot[pc].mean()
+    axes[i].text(
+        x_pos - 0.05 * (df_plot[pc].max() - df_plot[pc].min()),
+        1.08 * axes[i].get_ylim()[1],
+        f"p = {p_fdr[i]:.3e} {sig_labels[i]}",
+        ha='center', va='bottom',
+        fontsize=20, fontweight='bold', color='black',
+        bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=2)
+    )
+
+# Place legend underneath
+handles, labels = axes[0].get_legend_handles_labels()
+fig.legend(handles, labels, loc='lower center', ncol=2, fontsize=26, frameon=False)
+
+plt.subplots_adjust(bottom=0.2, wspace=0.3)  # leave space for legend
+plt.tight_layout(rect=[0, 0.2, 1, 1])
+plt.savefig(os.path.join(list(input_dirs.values())[0], "pca_density_plots.png"), dpi=500)
+plt.show()
+
+import matplotlib.lines as mlines
+
+# ------------------ Scatter plots with unified legend underneath ------------------
+fig, axes = plt.subplots(1, 3, figsize=(20, 7))
+
+scatter_params = {
+    "data": df_plot,
+    "style": "Approach",
+    "palette": {"Label": "blue", "Spatial Prior": "red"},
+    "s": 120,
+    "legend": False  # disable internal legend
+}
+
+# Plot all three scatterplots
+sns.scatterplot(x='PCA_X', y='PCA_Y', hue='Approach', ax=axes[0], **scatter_params)
+axes[0].set_title("PC1 vs PC2", fontsize=24, weight='bold')
+axes[0].set_xlabel("PC1 (Anterior–Posterior)", fontsize=22)
+axes[0].set_ylabel("PC2 (Left–Right)", fontsize=22)
+axes[0].grid(True, color='lightgrey', linestyle='--', linewidth=0.5)
+
+sns.scatterplot(x='PCA_X', y='PCA_Z', hue='Approach', ax=axes[1], **scatter_params)
+axes[1].set_title("PC1 vs PC3", fontsize=24, weight='bold')
+axes[1].set_xlabel("PC1 (Anterior–Posterior)", fontsize=22)
+axes[1].set_ylabel("PC3 (Caudal–Rostral)", fontsize=22)
+axes[1].grid(True, color='lightgrey', linestyle='--', linewidth=0.5)
+
+sns.scatterplot(x='PCA_Y', y='PCA_Z', hue='Approach', ax=axes[2], **scatter_params)
+axes[2].set_title("PC2 vs PC3", fontsize=24, weight='bold')
+axes[2].set_xlabel("PC2 (Left–Right)", fontsize=22)
+axes[2].set_ylabel("PC3 (Caudal–Rostral)", fontsize=22)
+axes[2].grid(True, color='lightgrey', linestyle='--', linewidth=0.5)
+
+# Manually create legend handles
+label_handle = mlines.Line2D([], [], color='blue', marker='o', linestyle='None', markersize=10, label='Label')
+sp_handle = mlines.Line2D([], [], color='red', marker='X', linestyle='None', markersize=10, label='Spatial Prior')
+
+fig.legend(handles=[label_handle, sp_handle], loc='lower center', ncol=2, fontsize=26, frameon=False)
+
+plt.subplots_adjust(bottom=0.2, wspace=0.3)
+plt.tight_layout(rect=[0, 0.2, 1, 1])
+plt.savefig(os.path.join(list(input_dirs.values())[0], "pca_scatter_plots.png"), dpi=500)
+plt.show()
+
+# ------------------ 3. Heatmaps ------------------
+fig, axes = plt.subplots(1, 3, figsize=(20, 7))
+
+for i, pc in enumerate(['PCA_X', 'PCA_Y', 'PCA_Z']):
+    bins = np.linspace(df_plot[pc].min(), df_plot[pc].max(), 30)
+    df_plot[f'{pc}_binned'] = pd.cut(df_plot[pc], bins=bins)
+    voxel_density = df_plot.groupby([f'{pc}_binned', 'Approach']).size().unstack().fillna(0)
+    
+    sns.heatmap(voxel_density.T, cmap="YlGnBu", annot=False, cbar=True, ax=axes[i])
+    axes[i].set_title(f"Voxel Density along {pc}", fontsize=24, weight='bold')
+    axes[i].set_xlabel(f"{pc} Binned Values", fontsize=22)
+    axes[i].set_ylabel("Approach", fontsize=22)
+
+plt.subplots_adjust(bottom=0.15, wspace=0.3)
+plt.tight_layout(rect=[0, 0.15, 1, 1])
+plt.savefig(os.path.join(list(input_dirs.values())[0], "pca_heatmaps.png"), dpi=500)
+plt.show()
+
+# ------------------ 4. Pairwise correlation plot ------------------
+pair_df = df_plot[['PCA_X', 'PCA_Y', 'PCA_Z', 'Approach']]
+
+g = sns.pairplot(pair_df, hue="Approach",
+                 palette={"Label": "blue", "Spatial Prior": "red"},
+                 markers=["o", "s"], height=3.5, kind="scatter")
+g.fig.suptitle("Pairwise PCA Projections for Label vs Spatial Prior", y=1.02, fontsize=24, weight='bold')
+
+for lh in g._legend.legendHandles:
+    lh.set_alpha(1)
+g._legend.set_bbox_to_anchor((0.5, -0.05))
+g._legend.set_frame_on(False)
+g._legend._loc = 9  # lower center
+
+plt.tight_layout()
+g.savefig(os.path.join(list(input_dirs.values())[0], "pca_pairplot.png"), dpi=500)
+plt.show()
