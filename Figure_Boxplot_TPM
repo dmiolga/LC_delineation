@@ -177,3 +177,173 @@ def plot_metrics_no_CI(df):
     plt.show()
 
 plot_metrics_no_CI(df_all)
+
+##############
+import os
+import nibabel as nib
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from scipy.stats import entropy, wasserstein_distance
+import matplotlib.colors as mcolors
+
+main_dir = "/../LC_TPM_comparison/NM_seg"
+results_list = []
+
+sns.set_style("whitegrid")
+
+# Helper Functions 
+def normalize(prob_map):
+    """Flatten and normalize a probability map."""
+    flat = prob_map.flatten()
+    total = np.sum(flat)
+    return flat / total if total > 0 else flat
+
+def extract_author(filename):
+    """Extract author from filename based on naming convention."""
+    return filename.split("_c7coreg_")[0]
+
+def process_segmentations(subfolder, results_list):
+    """Compute KL divergence and EMD for all segmentations in a subfolder."""
+    subfolder_path = os.path.join(main_dir, subfolder)
+
+    manual_file = next((f for f in os.listdir(subfolder_path)
+                        if f.startswith("manseg_") and f.endswith(".nii")), None)
+    if not manual_file:
+        print(f"Skipping {subfolder}: No manual segmentation found.")
+        return
+
+    manual_nii = nib.load(os.path.join(subfolder_path, manual_file))
+    manual_data = (manual_nii.get_fdata() > 0).astype(np.uint8)
+
+    nifti_files = [f for f in os.listdir(subfolder_path)
+                   if f.endswith(".nii") and not f.startswith(("AVEraged25_", "manseg_", "coreg_", "._", "w"))]
+
+    if not nifti_files:
+        print(f"Skipping {subfolder}: No valid probabilistic files found.")
+        return
+
+    for seg_file in nifti_files:
+        seg_path = os.path.join(subfolder_path, seg_file)
+        seg_nii = nib.load(seg_path)
+        seg_data = seg_nii.get_fdata()
+
+        if seg_data.shape != manual_data.shape:
+            print(f"Skipping {seg_file} in {subfolder}: shape mismatch {manual_data.shape} vs {seg_data.shape}")
+            continue
+
+        author = extract_author(seg_file)
+
+        # Normalize distributions
+        p = normalize(seg_data)
+        q = normalize(manual_data.astype(np.float32))
+
+        # Avoid zeros for KL divergence
+        p_safe = np.where(p == 0, 1e-10, p)
+        q_safe = np.where(q == 0, 1e-10, q)
+
+        kl_div = entropy(q_safe, p_safe)
+        emd = wasserstein_distance(q, p)
+
+        results_list.append({
+            "Subject": subfolder,
+            "Author": author,
+            "KL Divergence": kl_div,
+            "EMD": emd
+        })
+
+# Processing 
+subfolders = [f for f in os.listdir(main_dir) if os.path.isdir(os.path.join(main_dir, f))]
+
+for subfolder in subfolders:
+    process_segmentations(subfolder, results_list)
+
+# Save Summary CSV with CI 
+df_metrics = pd.DataFrame(results_list)
+df_metrics['Author'] = df_metrics['Author'].replace('Olga', 'group-level')  # Optional rename
+
+summary_list = []
+metrics = ['KL Divergence', 'EMD']
+
+for metric in metrics:
+    for author in df_metrics['Author'].unique():
+        data = df_metrics[df_metrics['Author'] == author][metric].dropna()
+        mean = data.mean()
+        median = data.median()
+        std = data.std()
+        ci95 = 1.96 * std / np.sqrt(len(data)) if len(data) > 1 else np.nan
+
+        summary_list.append({
+            "Author": author,
+            "Metric": metric,
+            "Mean": mean,
+            "Median": median,
+            "SD": std,
+            "CI95": ci95
+        })
+
+df_summary = pd.DataFrame(summary_list)
+df_summary.to_csv(os.path.join(main_dir, "kl_emd_metrics_with_CI.csv"), index=False)
+print("Summary CSV with CI saved successfully.")
+
+# Plotting
+# Global font/plot settings (same as other scripts)
+plt.rcParams.update({
+    "font.size": 18,        # base font size
+    "axes.titlesize": 22,   # subplot titles
+    "axes.labelsize": 20,   # axis labels
+    "xtick.labelsize": 16,  # tick labels
+    "ytick.labelsize": 16,  # tick labels
+    "legend.fontsize": 18   # legend (if added later)
+})
+
+def plot_kl_emd(df):
+    """Boxplot of KL and EMD metrics by author, colors indicate best performance."""
+    metrics = ['KL Divergence', 'EMD']
+    authors = sorted(df['Author'].unique())  # Alphabetical order
+
+    fig, axes = plt.subplots(1, 2, figsize=(18, 8))  # bigger and consistent with others
+
+    for i, metric in enumerate(metrics):
+        ax = axes[i]
+        metric_data = df[(df[metric] > 0) & (~df[metric].isna())].copy()
+        if metric_data.empty:
+            ax.set_visible(False)
+            continue
+
+        # Compute mean per author to set colors (lower = better)
+        stats = metric_data.groupby('Author')[metric].mean()
+        norm_values = stats.max() - stats
+        norm = mcolors.Normalize(vmin=norm_values.min(), vmax=norm_values.max())
+        cmap = plt.cm.Blues
+        colors = [cmap(norm(stats[author])) for author in authors]
+
+        sns.boxplot(
+            x="Author", y=metric, data=metric_data,
+            order=authors,
+            palette=dict(zip(authors, colors)),
+            width=0.5, ax=ax
+        )
+
+        sns.stripplot(
+            x="Author", y=metric, data=metric_data,
+            order=authors, color='black', alpha=0.6, jitter=True, ax=ax
+        )
+
+        ax.set_title(f"{metric} by Author", fontsize=22, weight="bold")
+        ax.set_xlabel("Author", fontsize=20)
+        ax.set_ylabel(metric, fontsize=20)
+        ax.tick_params(axis='x', rotation=45, labelsize=16)
+        ax.tick_params(axis='y', labelsize=16)
+
+        ymin = metric_data[metric].min()
+        ymax = metric_data[metric].max()
+        buffer = 0.1 * (ymax - ymin) if ymax > ymin else 0.1
+        ax.set_ylim(ymin - buffer, ymax + buffer)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(main_dir, "kl_emd_boxplots_best_colors.png"), dpi=400)  # higher dpi
+    plt.show()
+
+plot_kl_emd(df_metrics)
