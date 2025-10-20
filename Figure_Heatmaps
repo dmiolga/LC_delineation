@@ -1,0 +1,59 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+
+# Colorblind-friendly palette (max 10 colors)
+palette = sns.color_palette("tab10", n_colors=len(authors))  # 10 distinct colors
+colors = dict(zip(authors, palette))
+
+line_styles = ['solid', 'dashed', 'dotted', 'dashdot'] * ((len(authors)//4)+1)
+line_styles = dict(zip(authors, line_styles))
+
+fig, axes = plt.subplots(2, 2, figsize=(18, 14), dpi=400, sharey=True)
+method_data = {
+    "Atlas-based": atlas_data,
+    "LC-prior": tpm_data
+}
+
+for col, (method_name, data) in enumerate(method_data.items()):
+    for author in data.keys():
+        display_name = "group-level" if author == "Dmitrichenko" else author
+        left = np.array(data[author]['left'])
+        right = np.array(data[author]['right'])
+        
+        axes[0, col].plot(left, slices, color=colors[author], lw=2, label=display_name)
+        axes[0, col].fill_betweenx(slices, 0, left, color=colors[author], alpha=0.3)
+        
+        axes[1, col].plot(right, slices, color=colors[author], lw=2, label=display_name)
+        axes[1, col].fill_betweenx(slices, 0, right, color=colors[author], alpha=0.3)
+
+axes[0,0].set_title("Atlas-based Labelling (Left Hemisphere)")
+axes[0,1].set_title("LC-focused spatial tissue prior (Left Hemisphere)")
+axes[1,0].set_title("Atlas-based Labelling (Right Hemisphere)")
+axes[1,1].set_title("LC-focused spatial tissue prior (Right Hemisphere)")
+
+axes[1,0].set_xlabel("Number of LC Voxels")
+axes[1,1].set_xlabel("Number of LC Voxels")
+axes[0,0].set_ylabel("z - axis (Caudal → Rostral)")
+axes[1,0].set_ylabel("z - axis (Caudal → Rostral)")
+
+for ax in axes.flatten():
+    ax.invert_yaxis()
+
+handles, labels = axes[0,0].get_legend_handles_labels()
+by_label = dict(zip(labels, handles))
+fig.legend(
+    by_label.values(), by_label.keys(),
+    loc='lower center',
+    ncol=5,
+    fontsize=24,
+    handlelength=3,
+    handleheight=2,
+    borderpad=1,
+    frameon=True,
+    bbox_to_anchor=(0.5, -0.05)  # move legend below the axes
+)
+
+
+plt.tight_layout(rect=[0,0.08,1,1])
+plt.show()
