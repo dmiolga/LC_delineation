@@ -1,0 +1,29 @@
+import nibabel as nib
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+
+nii_path = "/../LREN_TPM_4D.nii"
+img = nib.load(nii_path)
+data = img.get_fdata()  # Shape: (X, Y, Z, 7)
+print("Data shape:", data.shape)
+
+# Extract 7th tissue class 
+tissue7 = data[..., 6]
+
+# Find the slice (axial view) with the most voxels for tissue class 7
+slice_sums = tissue7.sum(axis=(0, 1))
+max_slice_idx = np.argmax(slice_sums)
+print("Slice with max tissue 7:", max_slice_idx)
+
+fig, axes = plt.subplots(1, 7, figsize=(18, 4))
+for i in range(7):
+    ax = axes[i]
+    ax.imshow(data[..., max_slice_idx, i].T, 
+              cmap=cm.viridis, 
+              origin='lower')
+    ax.set_title(f"Tissue {i+1}")
+    ax.axis("off")
+
+plt.tight_layout()
+plt.show()
