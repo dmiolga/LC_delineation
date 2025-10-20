@@ -1,0 +1,179 @@
+import os
+import nibabel as nib
+import numpy as np
+import pandas as pd
+from scipy.stats import ttest_ind
+from scipy.ndimage import center_of_mass
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+main_dir = "../LC_TPM_comparison/NM_seg"
+
+# Metric Functions
+def soft_dice(p, q):
+    numerator = 2 * np.sum(p * q)
+    denominator = np.sum(p**2) + np.sum(q**2)
+    return numerator / denominator if denominator != 0 else 0
+
+def volume_intersection(p, q):
+    return np.sum(np.minimum(p, q))
+
+def voxelwise_corr(p, q):
+    mask = (p + q) > 0
+    return pearsonr(p[mask], q[mask])[0] if np.any(mask) else np.nan
+
+def expected_com_distance(p, q):
+    p_com = center_of_mass(p)
+    q_com = center_of_mass(q)
+    return np.linalg.norm(np.array(p_com) - np.array(q_com))
+
+def extract_author(filename):
+    return filename.split("_c7coreg_")[0]
+
+# Segmentation Processing
+results_list = []
+
+def process_segmentations(subfolder, results_list):
+    subfolder_path = os.path.join(main_dir, subfolder)
+
+    manual_file = next((f for f in os.listdir(subfolder_path) 
+                        if f.startswith("manseg_") and f.endswith(".nii")), None)
+    if not manual_file:
+        print(f"Skipping {subfolder}: No manual segmentation found.")
+        return
+
+    manual_nii = nib.load(os.path.join(subfolder_path, manual_file))
+    manual_data = (manual_nii.get_fdata() > 0).astype(np.uint8)
+
+    nifti_files = [
+        f for f in os.listdir(subfolder_path)
+        if f.endswith(".nii") and not f.startswith(("AVEraged25_", "manseg_", "coreg_", "._", "w"))
+    ]
+    if not nifti_files:
+        print(f"Skipping {subfolder}: No valid segmentation files found.")
+        return
+
+    for seg_file in nifti_files:
+        seg_nii = nib.load(os.path.join(subfolder_path, seg_file))
+        seg_data = seg_nii.get_fdata()
+
+        if seg_data.shape != manual_data.shape:
+            print(f"Skipping {seg_file} in {subfolder}: shape mismatch {manual_data.shape} vs {seg_data.shape}")
+            continue
+
+        author = extract_author(seg_file)
+
+        # Compute metrics
+        dice = soft_dice(manual_data, seg_data)
+        vol_int = volume_intersection(manual_data, seg_data)
+        corr = voxelwise_corr(manual_data, seg_data)
+        com_dist = expected_com_distance(manual_data, seg_data)
+
+        results_list.append({
+            "Subject": subfolder,
+            "Author": author,
+            "Soft Dice": dice,
+            "Volume Intersection": vol_int,
+            "Voxelwise Correlation": corr,
+            "COM Distance": com_dist
+        })
+
+# Run Over All Subfolders
+subfolders = [f for f in os.listdir(main_dir) if os.path.isdir(os.path.join(main_dir, f))]
+
+for subfolder in subfolders:
+    process_segmentations(subfolder, results_list)
+
+# Create Summary CSV with CI
+df_all = pd.DataFrame(results_list)
+df_all['Author'] = df_all['Author'].replace('Olga', 'group-level')
+
+metrics = ['Soft Dice', 'Volume Intersection', 'Voxelwise Correlation', 'COM Distance']
+summary_list = []
+
+for metric in metrics:
+    for author in df_all['Author'].unique():
+        data = df_all[df_all['Author'] == author][metric].dropna()
+        mean = data.mean()
+        median = data.median()
+        std = data.std()
+        ci95 = 1.96 * std / np.sqrt(len(data)) if len(data) > 1 else np.nan  # 95% CI
+
+        summary_list.append({
+            "Author": author,
+            "Metric": metric,
+            "Mean": mean,
+            "Median": median,
+            "SD": std,
+            "CI95": ci95
+        })
+
+df_summary = pd.DataFrame(summary_list)
+df_summary.to_csv(os.path.join(main_dir, "metric_summary_with_CI.csv"), index=False)
+print("Summary CSV with CI saved successfully.")
+
+# Plot Without CI, Alphabetical Authors, Colors = best 
+import matplotlib.colors as mcolors
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# Global font/plot settings (same as first script)
+plt.rcParams.update({
+    "font.size": 18,        # base font size
+    "axes.titlesize": 22,   # subplot titles
+    "axes.labelsize": 20,   # axis labels
+    "xtick.labelsize": 16,  # x-ticks
+    "ytick.labelsize": 16,  # y-ticks
+    "legend.fontsize": 18   # legend (if added later)
+})
+
+def plot_metrics_no_CI(df):
+    metrics = ['Soft Dice', 'Volume Intersection', 'Voxelwise Correlation', 'COM Distance']
+    authors = sorted(df['Author'].unique())  # Alphabetical order
+    fig, axes = plt.subplots(2, 2, figsize=(18, 14))  # slightly larger
+
+    for i, metric in enumerate(metrics):
+        ax = axes[i // 2, i % 2]
+        metric_data = df[(df[metric] > 0) & (~df[metric].isna())].copy()
+        if metric_data.empty:
+            ax.set_visible(False)
+            continue
+
+        # Compute mean per author to set colors
+        stats = metric_data.groupby('Author')[metric].mean()
+
+        # Normalize colors: higher=better (except COM Distance)
+        if metric == 'COM Distance':  # lower = better
+            norm_values = stats.max() - stats
+        else:
+            norm_values = stats
+        norm = mcolors.Normalize(vmin=norm_values.min(), vmax=norm_values.max())
+        cmap = plt.cm.Blues
+        colors = [cmap(norm(stats[author])) for author in authors]
+
+        # Boxplot
+        sns.boxplot(
+            x='Author', y=metric, data=metric_data,
+            order=authors,
+            palette=dict(zip(authors, colors)),
+            width=0.6, ax=ax
+        )
+
+        # Stripplot of individual points
+        sns.stripplot(
+            x='Author', y=metric, data=metric_data,
+            order=authors, color='black', alpha=0.6, jitter=True, ax=ax
+        )
+
+        # Titles and labels
+        ax.set_title(f"{metric} by Author", fontsize=22, weight="bold")
+        ax.set_xlabel("Author", fontsize=20)
+        ax.set_ylabel(metric, fontsize=20)
+        ax.tick_params(axis='x', rotation=45, labelsize=16)
+        ax.tick_params(axis='y', labelsize=16)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(main_dir, "metrics_boxplots_blue.png"), dpi=400)  # high DPI
+    plt.show()
+
+plot_metrics_no_CI(df_all)
