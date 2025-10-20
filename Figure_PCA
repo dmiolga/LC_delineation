@@ -7,8 +7,8 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 input_dirs = {
-    "Label": "/Volumes/OlgaDrive/PhD/Olga_Backup/Results/LC_label_neuromorph/Consensus_Analysis",
-    "Spatial Prior": "/Volumes/OlgaDrive/PhD/Olga_Backup/Results/LC_TPM_neuromorph/Consensus_Analysis"
+    "Label": "/../LC_label_neuromorph/Consensus_Analysis",
+    "Spatial Prior": "/../LC_TPM_neuromorph/Consensus_Analysis"
 }
 
 coord_data = []
