@@ -1,0 +1,143 @@
+import os
+import numpy as np
+import nibabel as nib
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from nilearn.image import resample_to_img
+from sklearn.metrics import cohen_kappa_score
+from scipy.spatial.distance import directed_hausdorff
+import matplotlib.colors as mcolors
+
+main_dir = "/../LC_label_comparison"
+sns.set_style("whitegrid")
+
+def dice_similarity(mask1, mask2):
+    mask1, mask2 = mask1.astype(bool), mask2.astype(bool)
+    intersection = np.logical_and(mask1, mask2).sum()
+    return (2.0 * intersection) / (mask1.sum() + mask2.sum()) if (mask1.sum() + mask2.sum()) > 0 else 0
+
+def volume_similarity(mask1, mask2):
+    vol1, vol2 = np.sum(mask1 > 0), np.sum(mask2 > 0)
+    return 1 - abs(vol1 - vol2) / (vol1 + vol2) if (vol1 + vol2) > 0 else 0
+
+def hausdorff_distance(mask1, mask2):
+    coords1, coords2 = np.array(np.nonzero(mask1)).T, np.array(np.nonzero(mask2)).T
+    d1 = directed_hausdorff(coords1, coords2)[0]
+    d2 = directed_hausdorff(coords2, coords1)[0]
+    return max(d1, d2)
+
+def extract_author(filename):
+    return filename.split("_LC_label_")[0]
+
+def process_segmentations(subfolder, results_list):
+    subfolder_path = os.path.join(main_dir, subfolder)
+    
+    # Load manual segmentation
+    manual_file = next((f for f in os.listdir(subfolder_path) if f.startswith("manseg_") and f.endswith(".nii")), None)
+    if not manual_file:
+        print(f"Skipping {subfolder}: No manual segmentation found.")
+        return
+
+    manual_nii = nib.load(os.path.join(subfolder_path, manual_file))
+    manual_data = (manual_nii.get_fdata() > 0).astype(np.uint8)
+
+    # Load other masks
+    nifti_files = [
+        f for f in os.listdir(subfolder_path)
+        if f.endswith(".nii") and not f.startswith(("manseg_", "coreg_", "._", "AVEraged_LC_label_", "LREN_LC_label_"))
+    ]
+    if not nifti_files:
+        print(f"Skipping {subfolder}: No valid segmentation files found.")
+        return
+
+    subject_results = []
+    for file in nifti_files:
+        mask_nii = nib.load(os.path.join(subfolder_path, file))
+        mask_resampled = resample_to_img(mask_nii, manual_nii, interpolation="nearest")
+        mask_data = (mask_resampled.get_fdata() > 0).astype(np.uint8)
+
+        # Compute metrics
+        dice = dice_similarity(manual_data, mask_data)
+        vol_sim = volume_similarity(manual_data, mask_data)
+        hausdorff = hausdorff_distance(manual_data, mask_data)
+        kappa = cohen_kappa_score(manual_data.flatten() > 0, mask_data.flatten() > 0)
+
+        author = extract_author(file)
+        subject_results.append([author, subfolder, dice, vol_sim, kappa, hausdorff])
+        results_list.append([author, subfolder, dice, vol_sim, kappa, hausdorff])
+
+    # Save per-subject metrics
+    df_subject = pd.DataFrame(subject_results, columns=["Author", "Subject", "Dice Score", "Volume Similarity", "Cohen's Kappa", "Hausdorff Distance"])
+    df_subject.to_excel(os.path.join(subfolder_path, f"{subfolder}_metrics.xlsx"), index=False)
+    print(f"Saved subject metrics for {subfolder}")
+
+# Processing 
+all_results = []
+for subfolder in os.listdir(main_dir):
+    subfolder_path = os.path.join(main_dir, subfolder)
+    if os.path.isdir(subfolder_path):
+        process_segmentations(subfolder, all_results)
+
+df_all = pd.DataFrame(all_results, columns=["Author", "Subject", "Dice Score", "Volume Similarity", "Cohen's Kappa", "Hausdorff Distance"])
+df_all["Author"] = df_all["Author"].replace({"Olga": "group-level"})
+df_all.to_excel(os.path.join(main_dir, "all_authors_metrics.xlsx"), index=False)
+print("Saved combined metrics table for all authors (full data).")
+
+# Visualization 
+plt.rcParams.update({
+    "font.size": 20,        # overall base font size
+    "axes.titlesize": 24,   # subplot titles
+    "axes.labelsize": 22,   # axis labels
+    "xtick.labelsize": 20,  # x tick labels
+    "ytick.labelsize": 20,  # y tick labels
+    "legend.fontsize": 20   # legend
+})
+
+metrics_info = [
+    ("Dice Score", "Dice Score", "Dice Score"),
+    ("Volume Similarity", "Volume Similarity", "Volume Similarity"),
+    ("Cohen's Kappa", "Cohen's Kappa", "Cohen's Kappa"),
+    ("Hausdorff Distance", "Hausdorff Distance", "Hausdorff Distance (mm)")
+]
+
+# Filter low values for plotting
+df_plot = df_all[(df_all["Dice Score"] >= 0.1) & 
+                 (df_all["Volume Similarity"] >= 0.1) & 
+                 (df_all["Cohen's Kappa"] >= 0.1)]
+sorted_authors = sorted(df_plot["Author"].unique())
+
+fig, axes = plt.subplots(2, 2, figsize=(18, 14)) 
+axes = axes.flatten()
+
+for ax, (metric, title, ylabel) in zip(axes, metrics_info):
+    stats = df_plot.groupby("Author")[metric].mean()
+    if metric == "Hausdorff Distance":
+        norm_values = stats.max() - stats
+    else:
+        norm_values = stats
+    norm = mcolors.Normalize(vmin=norm_values.min(), vmax=norm_values.max())
+    cmap = plt.cm.Greens
+    colors = [cmap(norm(stats[author])) for author in sorted_authors]
+
+    sns.boxplot(
+        x="Author", y=metric, data=df_plot,
+        order=sorted_authors,
+        palette=dict(zip(sorted_authors, colors)), ax=ax
+    )
+    sns.stripplot(
+        x="Author", y=metric, data=df_plot,
+        order=sorted_authors,
+        color='black', alpha=0.6, jitter=True, ax=ax
+    )
+
+    ax.set_title(title, fontsize=24, weight='bold')
+    ax.set_ylabel(ylabel, fontsize=22)
+    ax.set_xlabel("Author", fontsize=22)
+    ax.tick_params(axis='x', rotation=45, labelsize=20)
+    ax.tick_params(axis='y', labelsize=20)
+    ax.set_ylim(0, None)
+
+plt.tight_layout()
+plt.savefig(os.path.join(main_dir, "all_metrics_2x2_green.png"), dpi=500) 
+plt.show()
